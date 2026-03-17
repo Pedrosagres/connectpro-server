@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 # ============================================================
-#  ConnectPro — Servidor de Codigos
-#  Mapeia codigo numerico (ex: 482731) -> URL do Cloudflare
-#  Deploy no Render.com (gratuito)
+#  ConnectPro Server v2.0  —  WebRTC Signaling
 # ============================================================
 
 from flask import Flask, request, jsonify
-import random, time, threading
+import threading, time, random
 
 app = Flask(__name__)
 
-# Armazena: { "482731": { "url": "wss://...", "expires": timestamp } }
 _sessions = {}
 _lock     = threading.Lock()
-SESSION_TTL = 3600  # 1 hora
+TTL       = 3600
 
 
 def _cleanup():
-    """Remove sessoes expiradas periodicamente."""
     while True:
         time.sleep(60)
         now = time.time()
@@ -29,8 +25,7 @@ def _cleanup():
 threading.Thread(target=_cleanup, daemon=True).start()
 
 
-def _gen_code() -> str:
-    """Gera codigo numerico unico de 6 digitos."""
+def _gen_code():
     with _lock:
         for _ in range(100):
             code = str(random.randint(100000, 999999))
@@ -39,41 +34,93 @@ def _gen_code() -> str:
     return str(random.randint(100000, 999999))
 
 
-@app.route('/register', methods=['POST'])
-def register():
-    """Agent registra a URL do tunel e recebe o codigo numerico."""
-    data = request.get_json(force=True)
-    url  = data.get('url', '').strip()
-    if not url:
-        return jsonify({'error': 'url obrigatoria'}), 400
+@app.route('/ping')
+def ping():
+    return jsonify({'status': 'ok'})
 
+
+@app.route('/session/create', methods=['POST'])
+def session_create():
+    data  = request.get_json(force=True)
+    offer = data.get('offer')
+    if not offer:
+        return jsonify({'error': 'offer required'}), 400
     code = _gen_code()
     with _lock:
         _sessions[code] = {
-            'url':     url,
-            'expires': time.time() + SESSION_TTL
+            'offer':      offer,
+            'answer':     None,
+            'ice_agent':  [],
+            'ice_viewer': [],
+            'expires':    time.time() + TTL,
         }
     return jsonify({'code': code})
 
 
-@app.route('/resolve/<code>', methods=['GET'])
-def resolve(code):
-    """Viewer consulta o codigo e recebe a URL do tunel."""
-    code = code.strip()
+@app.route('/session/<code>/ice_agent', methods=['POST'])
+def post_ice_agent(code):
+    data = request.get_json(force=True)
     with _lock:
-        session = _sessions.get(code)
-    if not session:
-        return jsonify({'error': 'codigo invalido ou expirado'}), 404
-    if session['expires'] < time.time():
-        with _lock:
-            _sessions.pop(code, None)
-        return jsonify({'error': 'codigo expirado'}), 404
-    return jsonify({'url': session['url']})
+        if code not in _sessions:
+            return jsonify({'error': 'not found'}), 404
+        _sessions[code]['ice_agent'].append(data.get('candidate'))
+    return jsonify({'ok': True})
 
 
-@app.route('/ping', methods=['GET'])
-def ping():
-    return jsonify({'status': 'ok'})
+@app.route('/session/<code>/offer', methods=['GET'])
+def get_offer(code):
+    with _lock:
+        s = _sessions.get(code)
+    if not s:
+        return jsonify({'error': 'invalid code'}), 404
+    return jsonify({'offer': s['offer']})
+
+
+@app.route('/session/<code>/answer', methods=['POST'])
+def post_answer(code):
+    data = request.get_json(force=True)
+    with _lock:
+        if code not in _sessions:
+            return jsonify({'error': 'not found'}), 404
+        _sessions[code]['answer'] = data.get('answer')
+    return jsonify({'ok': True})
+
+
+@app.route('/session/<code>/ice_viewer', methods=['POST'])
+def post_ice_viewer(code):
+    data = request.get_json(force=True)
+    with _lock:
+        if code not in _sessions:
+            return jsonify({'error': 'not found'}), 404
+        _sessions[code]['ice_viewer'].append(data.get('candidate'))
+    return jsonify({'ok': True})
+
+
+@app.route('/session/<code>/answer', methods=['GET'])
+def get_answer(code):
+    with _lock:
+        s = _sessions.get(code)
+    if not s:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'answer': s['answer']})
+
+
+@app.route('/session/<code>/ice_agent', methods=['GET'])
+def get_ice_agent(code):
+    with _lock:
+        s = _sessions.get(code)
+    if not s:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'candidates': s['ice_agent']})
+
+
+@app.route('/session/<code>/ice_viewer', methods=['GET'])
+def get_ice_viewer(code):
+    with _lock:
+        s = _sessions.get(code)
+    if not s:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'candidates': s['ice_viewer']})
 
 
 if __name__ == '__main__':
